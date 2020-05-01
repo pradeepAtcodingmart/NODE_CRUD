@@ -1,76 +1,112 @@
+global.env = process.env.NODE_ENV === undefined ? 'development' : 'production';
+
+const PORT = 8080;
+const SERVER_TIMEOUT_DURATION = 50000;
+
 const express = require('express');
 const app = express();
+const compression = require('compression');
 const bodyParser = require('body-parser');
-app.use(bodyParser.json());
+const HttpServer = require('http').createServer(app);
 
-var data = [{ id: 1, text: 'The shortest article. Ever.' }];
+global.log = require('logger').createLogger('dev.log');
+global.log.setLevel('error');
 
-app.get('', (req, res) =>
-  res.json({ code: 200, msg: 'mockData Server running' })
-);
+class Server {
+  constructor() {
+    this.models = [];
+    this.init();
+  }
 
-app.post('/mockData', (req, res) => {
-  try {
-    const duplicateData = data.filter(d => d.id === req.body.id);
-
-    if (duplicateData.length === 0) {
-      data.push(req.body);
-      res.json(data);
-    } else {
-      res.json({ code: 500, msg: 'duplicate id' });
+  async init() {
+    try {
+      await this.initDrivers();
+      this.initControllers();
+      this.initExpress();
+      this.initRoutes();
+      this.initServer();
+    } catch (err) {
+      console.log(err);
+      global.log.error(err);
+      process.exit(0);
     }
-  } catch (err) {
-    res.json({ code: 500, msg: err });
   }
-});
 
-app.get('/mockData', (req, res) => {
-  try {
-    res.json(data);
-  } catch (err) {
-    res.json({ code: 500, msg: err });
+  initExpress() {
+    //Enable request compression
+    app.use(compression());
+    app.use(bodyParser.json()); // to support JSON-encoded bodies
+
+    if (global.env === 'development') {
+      app.use(require('cors')());
+    }
   }
-});
 
-app.put('/mockData', (req, res) => {
-  try {
-    let tempData = [];
-    data.map((d, index) => {
-      if (d.id === req.body.id) {
-        tempData[index] = { ...req.body };
-      } else {
-        tempData[index] = { ...d };
+  initServer() {
+    console.log('----------init server-----------');
+    app
+      .listen(PORT, () => {
+        console.log(`Server Running ${PORT}`);
+      })
+      .setTimeout(SERVER_TIMEOUT_DURATION);
+  }
+
+  initDrivers() {
+    return new Promise(async (resolve, reject) => {
+      try {
+        this.cmsDB = await require('./driver/cms-db').connect();
+        this.models.push(this.cmsDB);
+
+        resolve();
+      } catch (err) {
+        console.log(err);
+        reject(err);
       }
     });
-    if (data.length !== tempData.length)
-      res.json({ code: 404, msg: 'id not found' });
-    else {
-      data = [...tempData];
-      res.json({ code: 200, msg: 'updated sucessfully' });
-    }
-  } catch (err) {
-    res.json({ code: 500, msg: err });
   }
-});
 
-app.delete('/mockData/:id', (req, res) => {
-  try {
-    let tempData = [];
-    data.map(d => {
-      if (d.id !== parseInt(req.params.id)) {
-        tempData = [...tempData, d];
-      }
+  initControllers() {
+    console.log('----------init controller-----------');
+    this.eventController = require('./controllers/event');
+  }
+
+  initRoutes() {
+    console.log('----------init routes-----------');
+
+    const colours = {
+      GET: '\x1b[32m',
+      POST: '\x1b[34m',
+      DELETE: '\x1b[31m',
+      PUT: '\x1b[33m',
+    };
+
+    app.use('*', (req, _, next) => {
+      console.log(colours[req.method] + req.method, '\x1b[0m' + req.baseUrl);
+      next();
+    });
+    const eventRouter = require('./routes/event')(this.eventController);
+
+    app.use('/', eventRouter.getRouter());
+  }
+
+  onClose() {
+    //Close all DB Connections
+    this.models.map((m) => {
+      m.close();
     });
 
-    if (data.length === tempData.length)
-      res.json({ code: 404, msg: 'id not found' });
-    else {
-      data = [...tempData];
-      res.json({ code: 200, msg: 'deleted sucessfully' });
-    }
-  } catch (err) {
-    res.json({ code: 500, msg: err });
+    HttpServer.close();
   }
-});
+}
 
-app.listen(5000, () => console.log('Running port :5000'));
+const server = new Server();
+
+['SIGINT', 'SIGTERM', 'SIGQUIT'].forEach((eventType) => {
+  process.on(eventType, (err) => {
+    global.log.error(err);
+    server.onClose();
+    //to avoid executing multiple times
+    server.onClose = () => {};
+    process.exit(-1);
+  });
+});
